@@ -6,6 +6,50 @@ As per the URL lookup service request, I have some questions to help with my dis
 
 The URL lookup service is going to be receiving a copy of all HTTP methods your webserver receives, and not just a subset of only GET/POST requests, the service will need to be distributed across your regions and availability zones, scalable, and non-blocking.  Including that the caching layer should be shared across all URL lookup service deployments in your environment.
 
+## Dependencies
+
+### Redis Caching Server
+
+You need to have a redis server running locally.  If you are on a Mac, I suggest using Homebrew. 
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install.sh)"
+
+brew install redis
+brew service start redis
+```
+
+## Setup Process
+
+1. Install a Python virtual environment
+2. Activate the Python virtual environment
+3. Install the dependencies into the virtual environment
+4. Run the software
+5. Run the test cases
+
+```bash
+# Install the virtual environment for your native python installation
+pip3 install virtualenv
+
+# Create a folder for the virtual environment
+mkdir $HOME/.venv
+
+# Create a virtual environment
+virtualenv $HOME/.venv
+
+# Activate the virtualenv
+source $HOME/.venv/bin/activate
+
+# Install dependencies
+pip3 install -r requirements.txt
+
+# To run the application
+./run.sh
+
+# To run the unit tests
+./test.sh
+```
+
 ## Design
 
 In consideration of scaling of the service, I would like to propose that the scaling be based on splitting the request domain into chunks, rather than storing the entire domain itself, storing the top-level domain and parent domain as a single key, and any sub-domains into their own keys beneath the parent domain.  This way the number of requests towards a top-level domain or sub-domain of a parent, which in addition would allow distribution of the data to separate datasets based on domain, including indexing the path and query parameters beneath the domain. Each query parameter will have a safe parameter and a associated cost to limit the maximum number of query parameters.
