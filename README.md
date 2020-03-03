@@ -24,69 +24,6 @@ For example (in a JSON structure):
 
 * The dataset has a `safe` flag marking whether a request may or may not be safe towards the requested domain, path and query string.
 
-```json
-{
-  "cisco.com": {
-    "hits": 102,
-    "created": 1582924212,
-    "updated": 1582924214,
-    "safe": true,
-    "children": {
-      "www": {
-        "hits": 1,
-        "created": 1582924213,
-        "updated": 1582924214,
-        "safe": true,
-        "path": {
-            "/c/en/us/training-events/training-certifications/training-catalog/course-selector.html": {
-                "created": 1582924213,
-                "updated": 1582924214,
-                "hits": 1,
-                "safe": true,
-                "params": {
-                    "a": {
-                        "cost": 1,
-                        "safe": true
-                    },
-                    "b": {
-                        "cost": 1
-                        "safe": true
-                    }
-                }
-            }
-        }
-      },
-      "badguys": {
-        "hits": 100,
-        "created": 1582924213,
-        "updated": 1582924214,
-        "safe": false,
-        "path": {
-            "/c/en/us/training-events/training-certifications/training-catalog/course-selector.html": {
-                "created": 1582924213,
-                "updated": 1582924214,
-                "hits": 1,
-                "safe": false,
-                "params": {
-                    "a": {
-                        "cost": 1,
-                        "safe": true
-                    },
-                    "b": {
-                        "cost": 1
-                        "safe": true
-                    },
-                    "evil": {
-                        "cost": 100,
-                        "safe": false
-                    }
-                }
-            }
-        }
-    }
-}
-```
-
 ---
 
 ### Request Formats
@@ -139,15 +76,23 @@ HTTP/1.1 403 Forbidden
 Provide a list of domains.
 
 Method: `GET`
-
-URL: `https://[URL BLOCKING SERVICE FQDN or IP]/urlinfo/1/`
+URL: `https://[URL BLOCKING SERVICE FQDN or IP]/urlinfo/1/admin/domains`
 
 URL Parameters
 
 * `domain` (string) The domain you would like to return contents of the data
 * `safe` (string {true|false}|integer {0|1}): Returns entries that are marked safe (case-insensitive)
-* `depth` (integer (default: 5)): The depth that we will inspect and return entries.
-* `limit` (integer (default: 500)): The maximum number of records to return.
+
+HTTP Responses
+
+* HTTP 200 (OK) with JSON payload (the response may be empty)
+
+##### Get Details of a Domain
+
+Get details of a Domain
+
+Method: `GET`
+URL: `https://[URL BLOCKING SERVICE FQDN or IP]/urlinfo/1/admin/domain/<domain>`
 
 HTTP Responses
 
@@ -158,14 +103,13 @@ HTTP Responses
 Delete a Domain, Path or Query String from an element.
 
 Method: `DELETE`
-
 URL: `https://[URL BLOCKING SERVICE FQDN or IP]/urlinfo/1/`
 
 URL Parameters
 
 * `domain` (string) The domain you would like to return contents of the data
 * `path` (string) The path you want to delete (including all children)
-* `param` (string) The query parameter you want to delete
+* `qs` (string) The query parameter you want to delete
 
 HTTP Responses
 
@@ -177,7 +121,6 @@ HTTP Responses
 If the domain already exists, the domain and all sub-elements will be overwritten.  Optionally, a merge process can be implemented.
 
 Method: `POST`
-
 URL: `https://[URL BLOCKING SERVICE FQDN or IP]/urlinfo/1/`
 
 Request Body

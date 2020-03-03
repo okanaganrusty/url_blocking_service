@@ -11,10 +11,11 @@ from urllib.parse import urlparse
 
 import redis
 # import tldextract
-from flask import Flask, json
-from flask_restful import request
+from flask import Flask, abort, json
+from flask_restful import Api, Resource, request
 
 app = Flask(__name__)
+api = Api(app)
 
 # Divide each letter in the alphabet by 2, and the domain
 # that begins with that letter will be our database number
@@ -46,6 +47,86 @@ class UrlManagementException(Exception):
         self.response_message = response_message
 
         super().__init__(*args, **kwargs)
+
+
+class UrlManagementDomainsAPI(Resource):
+    """ Domain List API """
+
+    def get(self, **kwargs):
+        """ List of Domains """
+        self.redis = redis.StrictRedis(
+            host=kwargs.get('host', 'localhost'),
+            port=kwargs.get('port', 6379),
+            db=kwargs.get('db', 0),
+            decode_responses=True)
+
+        return self.redis.keys('*')
+
+
+class UrlManagementDomainAPI(Resource):
+    """ Domain Get API """
+
+    def get(self, domain_name, **kwargs):
+        """ Get a details for a specific domain """
+        self.redis = redis.StrictRedis(
+            host=kwargs.get('host', 'localhost'),
+            port=kwargs.get('port', 6379),
+            db=kwargs.get('db', 0),
+            decode_responses=True)
+
+        domain = self.redis.get(domain_name)
+
+        if domain:
+            return json.loads(domain)
+
+        abort(404)
+
+    def post(self, domain_name, **kwargs):
+        """
+        Simple post method to create a domain.  There
+        is no validation in any of these commands yet 
+        that will santize the data structure.
+        """
+
+        self.redis = redis.StrictRedis(
+            host=kwargs.get('host', 'localhost'),
+            port=kwargs.get('port', 6379),
+            db=kwargs.get('db', 0),
+            decode_responses=True)
+
+        data = request.get_json(force=True)
+
+        self.redis.set(domain_name, json.dumps(data))
+
+        if self.redis.exists(domain_name):
+            # Object created
+            return 202
+        else:
+            # Conflict
+            abort(409)
+
+    def delete(self, domain_name, **kwargs):
+        """
+        Simple delete method for now to delete a domain,
+        this will not delete specific paths or query strings
+        yet, so the entire entry will need to be reconstructed.
+        """
+
+        self.redis = redis.StrictRedis(
+            host=kwargs.get('host', 'localhost'),
+            port=kwargs.get('port', 6379),
+            db=kwargs.get('db', 0),
+            decode_responses=True)
+
+        self.redis.delete(domain_name)
+
+        if self.redis.exists(domain_name):
+            # 204 No Content is a popular response for DELETE
+            return 204
+
+        # Abort with a 404 if the object was not deleted or could
+        # not be found in the first place.
+        abort(404)
 
 
 class UrlManagement(object):
@@ -331,6 +412,9 @@ def get_request_url(request_url):
             }),
             mimetype='application/json')
 
+
+api.add_resource(UrlManagementDomainsAPI, '/admin/domains')
+api.add_resource(UrlManagementDomainAPI, '/admin/domain/<string:domain_name>')
 
 if __name__ == '__main__':
     app.run(port='8080', debug=True)
