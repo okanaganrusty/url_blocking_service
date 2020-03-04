@@ -58,7 +58,7 @@ pip3 install -r requirements.txt
 
 ## Design
 
-In consideration of scaling of the service, I would like to propose that the scaling be based on splitting the request domain into chunks, rather than storing the entire domain itself, storing the top-level domain and parent domain as a single key, and any sub-domains into their own keys beneath the parent domain.  This way the number of requests towards a top-level domain or sub-domain of a parent, which in addition would allow distribution of the data to separate datasets based on domain, including indexing the path and query parameters beneath the domain. Each query parameter will have a safe parameter and a associated cost to limit the maximum number of query parameters.
+In consideration of scaling of the service, I would like to propose that the scaling be based on splitting the request domain into chunks, rather than storing the entire domain itself, storing the top-level domain and parent domain as a single key, and any sub-domains into their own keys beneath the parent domain.  This way the number of requests towards a top-level domain or sub-domain of a parent, which in addition would allow distribution of the data to separate datasets based on domain, including indexing the path and query parameters beneath the domain. Each query parameter will have a safe parameter.
 
 For example (in a JSON structure):
 
