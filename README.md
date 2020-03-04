@@ -43,10 +43,10 @@ source $HOME/.venv/bin/activate
 # Install dependencies
 pip3 install -r requirements.txt
 
-# To run the application
+# To run the server application (app.py)
 ./run.sh
 
-# To run the unit tests
+# To run the unit tests to validate functionality (test.py)
 ./test.sh
 ```
 
@@ -58,15 +58,13 @@ For example (in a JSON structure):
 
 * The dataset is indexed based on the top-level domain and parent domain, with sub-domains defined as in the child key of the parent.  The application will determine the datasource based on the top-level and parent domain.
 
-* The dataset `hits` counter increases by 1 based on the number of requests received by the domain and any children domains.
-
-* The dataset has a `created` and `updated` timestamp which has the epoch (UNIX timestamp) which the record was last created and updated.
-
 * Depending on the cache/database layer chosen:
   * Caching layers such as redis may have an expires flag set allowing automatic purging of the data.  Use of a caching layer is our recommended approach.
   * Databases layers such as no SQL or a RDBMS may will need to be cleaned up by running a periodic task or job.
 
 * The dataset has a `safe` flag marking whether a request may or may not be safe towards the requested domain, path and query string.
+
+* The dataset is being validated by a JSON schema to ensure all data is well-formed.
 
 ---
 
@@ -89,7 +87,7 @@ GET /urlinfo/1/www.cisco.com:443/c/en/us/training-events/training-certifications
 
 ###### Response
 
-```
+```plain
 HTTP/1.1 200 OK
 ```
 
@@ -107,7 +105,7 @@ GET /urlinfo/1/badguy.cisco.com:443/c/en/us/training-events/training-certificati
 
 ###### Response
 
-```
+```plain
 HTTP/1.1 403 Forbidden
 ```
 
@@ -122,32 +120,92 @@ Provide a list of domains.
 Method: `GET`
 URL: `https://[URL BLOCKING SERVICE FQDN or IP]/urlinfo/1/admin/domains`
 
-URL Parameters
-
-* `domain` (string) The domain you would like to return contents of the data
-* `safe` (string {true|false}|integer {0|1}): Returns entries that are marked safe (case-insensitive)
-
 HTTP Responses
 
 * HTTP 200 (OK) with JSON payload (the response may be empty)
+
+Example Request and Response Payload
+
+```bash
+curl -v http://localhost:8080/admin/domains
+
+< HTTP/1.0 200 OK
+< Content-Type: application/json
+< Content-Length: 21
+< Server: Werkzeug/1.0.0 Python/3.8.1
+< Date: Wed, 04 Mar 2020 18:10:36 GMT
+```
+
+```json
+{
+    "safe": true
+}
+```
 
 ##### Get Details of a Domain
 
 Get details of a Domain
 
 Method: `GET`
-URL: `https://[URL BLOCKING SERVICE FQDN or IP]/urlinfo/1/admin/domain/<domain>`
+URL: `https://[URL BLOCKING SERVICE FQDN or IP]/admin/domain/<domain>`
 
 HTTP Responses
 
-* HTTP 200 (OK) with JSON payload (the response may be empty)
+* HTTP 200 (OK) with JSON payload
+
+Example Request and Response Payload #1
+
+```bash
+curl -v http://localhost:8080/admin/domain/www.cisco.com:443
+
+< HTTP/1.0 200 OK
+< Content-Type: application/json
+< Content-Length: 21
+< Server: Werkzeug/1.0.0 Python/3.8.1
+< Date: Wed, 04 Mar 2020 18:11:11 GMT
+```
+
+```json
+{
+    "safe": true
+}
+```
+
+Example Request and Response Payload #2 
+
+```bash
+curl -X GET 'http://localhost:8080/admin/domain/badguys.cisco.com:443'
+
+< HTTP/1.0 200 OK
+< Content-Type: application/json
+< Content-Length: 21
+< Server: Werkzeug/1.0.0 Python/3.8.1
+< Date: Wed, 04 Mar 2020 18:11:11 GMT
+```
+
+```json
+{
+    "path": {
+        "/safe": {
+            "qs": [
+                {
+                    "evil": "1234",
+                    "safe": false
+                }
+            ],
+            "safe": true
+        }
+    },
+    "safe": false
+}
+```
 
 ##### Delete a Domain, Path or Query String
 
 Delete a Domain, Path or Query String from an element.
 
 Method: `DELETE`
-URL: `https://[URL BLOCKING SERVICE FQDN or IP]/urlinfo/1/`
+URL: `https://[URL BLOCKING SERVICE FQDN or IP]/admin/domain/<domain>`
 
 URL Parameters
 
@@ -157,45 +215,42 @@ URL Parameters
 
 HTTP Responses
 
-* HTTP 202 (Accepted): If resource was deleted.
+* HTTP 204 (Accepted): If resource was deleted.
 * HTTP 404 (Not Found): If resource is not located.
+
+Example Response Payload
+
+```bash
+curl -v -X DELETE http://localhost:8080/admin/domain/www.cisco.com:443
+
+ HTTP/1.0 204 NO CONTENT
+< Content-Type: application/json
+< Server: Werkzeug/1.0.0 Python/3.8.1
+< Date: Wed, 04 Mar 2020 18:12:28 GMT
+```
 
 ##### Create a Domain
 
 If the domain already exists, the domain and all sub-elements will be overwritten.  Optionally, a merge process can be implemented.
 
 Method: `POST`
-URL: `https://[URL BLOCKING SERVICE FQDN or IP]/urlinfo/1/`
+URL: `https://[URL BLOCKING SERVICE FQDN or IP]/admin/domains`
 
 Request Body
 
 ```json
-"cisco.com": {
-"hits": 102,
-"created": 1582924212,
-"updated": 1582924214,
-"safe": true,
-"children": {
-    "www": {
-    "hits": 1,
-    "created": 1582924213,
-    "updated": 1582924214,
-    "safe": true,
-    "path": {
-        "/c/en/us/training-events/training-certifications/training-catalog/course-selector.html": {
-            "created": 1582924213,
-            "updated": 1582924214,
-            "hits": 1,
-            "safe": true,
-            "params": {
-                "a": {
-                    "cost": 1,
-                    "safe": true
-                },
-                "b": {
-                    "cost": 1
-                    "safe": true
-                }
+{
+    "badguys.cisco.com:443": {
+        "safe": false,
+        "path": {
+            "/safe": {
+                "safe": true,
+                "qs": [
+                    {
+                        "evil": "1234",
+                        "safe": false
+                    }
+                ]
             }
         }
     }
@@ -204,8 +259,24 @@ Request Body
 
 HTTP Responses
 
-* HTTP 201 (Created): If resource was created.
-* HTTP 404 (Not Found): If resource is not located.
+* HTTP 202 (Accepted): If resource was created.
+* HTTP 409 (Conflict): If resource already exists.
+
+Example Response Payload #1
+
+```bash
+curl \
+  --verbose \
+  --header "Content-Type: application/json" \
+  --request POST 'http://localhost:8080/admin/domains' \
+  --data "$(cat test.json)"
+
+< HTTP/1.0 202 ACCEPTED
+< Content-Type: text/html; charset=utf-8
+< Content-Length: 14
+< Server: Werkzeug/1.0.0 Python/3.8.1
+< Date: Wed, 04 Mar 2020 18:18:07 GMT
+```
 
 --
 

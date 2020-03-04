@@ -3,6 +3,7 @@
 
 """ URL blocking service unit test cases """
 
+import json
 import unittest
 
 from app import UrlManagement, app
@@ -258,6 +259,4 @@ class UrlTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    import json
-
     unittest.main()
