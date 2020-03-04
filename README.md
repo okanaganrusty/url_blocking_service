@@ -10,13 +10,19 @@ The URL lookup service is going to be receiving a copy of all HTTP methods your 
 
 ### Redis Caching Server
 
-You need to have a redis server running locally.  If you are on a Mac, I suggest using Homebrew. 
+You need to have a redis server running locally.  If you are on a Mac, I suggest using Homebrew on Mac OS X.
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install.sh)"
 
 brew install redis
 brew service start redis
+```
+
+Alternatively, we've supplied a docker-composer to initialize a local redis server.  If you run the following command, it will build a redis environment for you exposing TCP port 6379 so this server application and testing can make use of it.
+
+```bash
+docker-compose up
 ```
 
 ## Setup Process
