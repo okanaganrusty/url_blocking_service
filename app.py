@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# pylint: disable=invalid-name,no-member,line-too-long
+# pylint: disable=invalid-name,no-member,line-too-long,unused-argument,bad-continuation
 
 """ URL blocking service """
 
@@ -10,12 +10,78 @@ import time
 from urllib.parse import urlparse
 
 import redis
-# import tldextract
-from flask import Flask, abort, json
+import tldextract
+from flask import Flask, Response, abort, json
 from flask_restful import Api, Resource, request
+from jsonschema import validate
+from jsonschema.exceptions import ValidationError
 
 app = Flask(__name__)
 api = Api(app)
+
+# Validate our JSON
+JSON_SCHEMA = {
+	"$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "additionalProperties": False,
+
+    "patternProperties": {
+      "^.*$": {
+        "type": "object",
+        "$ref": "#/definitions/domain"
+      }
+    },
+      
+    "definitions": {
+      "additionalProperties": False,
+      "domain": {
+        "properties": {
+          "safe": { "type": "boolean" },
+          "updated": {
+            "type": "number"
+          }          
+        },
+        "patternProperties": {
+          "^(?!.*safe).*$": {
+            "type": "object",
+            "$ref": "#/definitions/path"
+          }
+        }          
+      },
+
+      "path": {
+        "properties": {
+          "safe": { "type": "boolean" },
+          "qs": { 
+            "type": "array", 
+            "items": {
+              "type": "object",
+              "$ref": "#/definitions/qs"
+            }
+          },
+          "updated": {
+            "type": "number"
+          },
+          "additionalProperties": False
+        }
+      },
+
+      "qs": {
+        "properties": {
+          "safe": { "type": "boolean" },
+          "updated": {
+            "type": "number"
+          }          
+        },
+        "patternProperties": {
+          "^(?!.*safe).*$": {
+            "type": "object",
+            "$ref": "#/definitions/path"
+          }
+        }
+      }
+    }
+  }
 
 # Divide each letter in the alphabet by 2, and the domain
 # that begins with that letter will be our database number
@@ -31,6 +97,7 @@ SHARD_DB_ID = {
     **SHARD_DB_ID_DIGIT,
     **SHARD_DB_ID_LETTER
 }
+REDIS_DB_MAX_ID = 16
 
 
 class UrlManagementException(Exception):
@@ -54,93 +121,166 @@ class UrlManagementDomainsAPI(Resource):
 
     def get(self, **kwargs):
         """ List of Domains """
-        self.redis = redis.StrictRedis(
-            host=kwargs.get('host', 'localhost'),
-            port=kwargs.get('port', 6379),
-            db=kwargs.get('db', 0),
-            decode_responses=True)
+        response = []
 
-        return self.redis.keys('*')
+        for index in range(REDIS_DB_MAX_ID):
+            c = redis.StrictRedis(
+                host=kwargs.get('host', 'localhost'),
+                port=kwargs.get('port', 6379),
+                db=kwargs.get('db', index),
+                decode_responses=True)
+
+            response.extend(c.keys('*'))
+
+        return response
+
+    def post(self, **kwargs):
+        """
+        Simple post method to create a new domain. There
+        is no validation in any of these commands yet
+        that will santize the data structure.
+        """
+
+        try:
+            # Get the raw JSON data
+            data = request.get_json(force=True)
+
+            domains = list(data)
+
+            if len(domains) != 1 or not domains[0]:
+                return app.response_class(
+                    response='Domain missing in request payload',
+                    status=406)
+
+            # Get the domain name from the raw JSON
+            domain = domains[0]
+
+            um = UrlManagement.get_instance_for_domain(domain)
+
+            if um.get_domain(domain):
+                return app.response_class(
+                    response='Domain already exists',
+                    status=409)
+
+            validate(instance=data.get(domain), schema=JSON_SCHEMA)
+
+            # Create the new domain
+            um.create(domain, json.dumps(data.get(domain)))
+
+            if um.get_domain(domain):
+                return Response(
+                    response='Domain created',
+                    status=202)
+
+            # An error occurred
+            return Response(
+                response='Domain not created (server error)',
+                status=500)
+
+        except ValidationError:
+            # If the validation fails, return 400 Bad Request since
+            # the data was invalid and did not conform to our
+            # JSON schema
+            return app.response_class(response='Validation error', status=500)
 
 
 class UrlManagementDomainAPI(Resource):
     """ Domain Get API """
+    redis = None
 
     def get(self, domain_name, **kwargs):
         """ Get a details for a specific domain """
-        self.redis = redis.StrictRedis(
-            host=kwargs.get('host', 'localhost'),
-            port=kwargs.get('port', 6379),
-            db=kwargs.get('db', 0),
-            decode_responses=True)
+        try:
+            um = UrlManagement.get_instance_for_domain(domain_name)
 
-        domain = self.redis.get(domain_name)
+            domain = um.get_domain(domain_name)
 
-        if domain:
-            return json.loads(domain)
+            if not domain:
+                abort(404, 'Domain not found')
 
-        abort(404)
+            return domain
 
-    def post(self, domain_name, **kwargs):
-        """
-        Simple post method to create a domain.  There
-        is no validation in any of these commands yet 
-        that will santize the data structure.
-        """
+        except ValidationError:
+            abort(404, 'Domain not found')
 
-        self.redis = redis.StrictRedis(
-            host=kwargs.get('host', 'localhost'),
-            port=kwargs.get('port', 6379),
-            db=kwargs.get('db', 0),
-            decode_responses=True)
-
-        data = request.get_json(force=True)
-
-        self.redis.set(domain_name, json.dumps(data))
-
-        if self.redis.exists(domain_name):
-            # Object created
-            return 202
-        else:
-            # Conflict
-            abort(409)
-
-    def delete(self, domain_name, **kwargs):
+    def delete(self, domain_name):
         """
         Simple delete method for now to delete a domain,
         this will not delete specific paths or query strings
         yet, so the entire entry will need to be reconstructed.
         """
 
-        self.redis = redis.StrictRedis(
-            host=kwargs.get('host', 'localhost'),
-            port=kwargs.get('port', 6379),
-            db=kwargs.get('db', 0),
-            decode_responses=True)
+        um = UrlManagement.get_instance_for_domain(domain_name)
 
-        self.redis.delete(domain_name)
+        if um.get_domain(domain_name):
+            um.delete(domain_name)
 
-        if self.redis.exists(domain_name):
             # 204 No Content is a popular response for DELETE
-            return 204
+            return "Domain deleted", 204
 
-        # Abort with a 404 if the object was not deleted or could
-        # not be found in the first place.
-        abort(404)
+        abort(404, "Domain not found")
 
 
-class UrlManagement(object):
+class UrlManagement:
     """ URL Management """
-    def __init__(self, **kwargs):
-        self.redis = redis.StrictRedis(
+
+    # Redis connection object
+    c = None
+
+    @classmethod
+    def get_instance_for_domain(cls, domain_name):
+        """ Database shard """
+        tld = tldextract.extract(domain_name)
+
+        db = SHARD_DB_ID.get(tld.domain[0], 0)
+
+        return cls(db=db)
+
+    @staticmethod
+    def empty(*args, **kwargs):
+        """ Flush the redis cache (destructive operation); used by tests """
+        if kwargs.get('db', None):
+            c = redis.StrictRedis(
+                host=kwargs.get('host', 'localhost'),
+                port=kwargs.get('port', 6379),
+                db=kwargs.get('db'),
+                decode_responses=True)
+            c.flushall()
+        else:
+            for index in range(REDIS_DB_MAX_ID):
+                c = redis.StrictRedis(
+                    host=kwargs.get('host', 'localhost'),
+                    port=kwargs.get('port', 6379),
+                    db=index,
+                    decode_responses=True)
+
+                c.flushall()
+
+        return True
+
+    @classmethod
+    def set_domain(cls, domain_name, *args, **kwargs):
+        """
+        Since we're using separate databases now we need
+        this for testing so we can inject fixtures into
+        the correct database during testing
+        """
+
+        c = cls.get_instance_for_domain(domain_name)
+
+        return c.set(domain_name, *args, **kwargs)
+
+    def __init__(self, *args, **kwargs):
+        """ Database number for requests """
+        self.c = redis.StrictRedis(
             host=kwargs.get('host', 'localhost'),
             port=kwargs.get('port', 6379),
             db=kwargs.get('db', 0),
             decode_responses=True)
 
-    def empty(self):
-        """ Flush the redis cache (destructive operation); used by tests """
-        return self.redis.flushall()
+    def create(self, domain_name, data):
+        """ Create a domain """
+        return self.c.set(domain_name, data)
 
     def get_domain(self, domain_name):
         """ Public method for now while we test """
@@ -152,18 +292,21 @@ class UrlManagement(object):
         # If the domain exists, we'll fetch the existing metadata and
         # so that we can make an update, otherwise we'll start with
         # a new uninitalized hash
-        mapping = self.redis.exists(domain_name) \
-            and self.redis.get(domain_name) \
+        mapping = self.c.exists(domain_name) \
+            and self.c.get(domain_name) \
             or {}
 
         # Convert JSON encoded payload to an object
         if isinstance(mapping, str):
             mapping = json.loads(mapping)
 
-        return mapping
+        if mapping:
+            return mapping
+
+        return {}
 
     def delete(self, domain_name, **kwargs):
-        """ Delete domain, path or query string """
+        """ Remove domain, path or query string """
         request_path = kwargs.get('path', None)
         request_qs = kwargs.get('qs', [])
 
@@ -183,13 +326,13 @@ class UrlManagement(object):
             if 'path' in mapping.keys() and request_path in mapping['path'].keys():
                 del mapping['path'][request_path]
 
-                self.redis.set(domain_name, json.dumps(mapping))
+                self.c.set(domain_name, json.dumps(mapping))
                 return True
         elif domain_name:
             # Delete the domain and all children
-            self.redis.delete(domain_name)
+            self.c.delete(domain_name)
 
-            return self.redis.exists(domain_name)
+            return self.c.exists(domain_name)
 
         return False
 
@@ -272,7 +415,7 @@ class UrlManagement(object):
                 if safe is not None:
                     mapping['safe'] = safe
 
-        self.redis.set(domain_name, json.dumps(mapping))
+        self.c.set(domain_name, json.dumps(mapping))
         return True
 
     def get(self, domain_name, **kwargs):
@@ -292,26 +435,40 @@ class UrlManagement(object):
         # If the domain exists, we'll fetch the existing metadata and
         # so that we can make an update, otherwise we'll start with
         # a new uninitalized hash
-        if not self.redis.exists(domain_name):
-            app.logger.debug(f"Domain {domain_name} could not be located")
-
-            return {}
-
         mapping = self._get_domain(domain_name)
 
-        # Inherits the safe attribute from the domain (if set); otherwise
-        # default to True
+        if not mapping:
+            # Our default is to return safe URLs
+            app.logger.debug(f"Domain {domain_name} could not be located")
+
+            return mapping
+
+        # Otherwise, Inherit the safe attribute from the domain, if it is
+        # set.  If it is not set, then default to the existing is_safe
+        # parameter, in this case would always be true at this point.
         is_safe = mapping.get('safe', is_safe)
 
-        # If a request path was provided, determine if the path is safe by
-        # checking the safe parameter of the hash, if it does not exist
-        # then use the default from the domain.
-        if request_path in mapping['path'].keys():
-            is_safe = mapping['path'][request_path].get('safe', is_safe)
+        # If the request path is empty (or None).
+        # If the mapping path is empty (None, {}).
+        # If the request path is not in the mapping path array.
+        #
+        # If the URL is not safe, return an Exception as there is
+        # no further processing to perform, or return the existing
+        # mapping if the URL is safe.
 
-        # Our Request path should always be set, unless we're looking at
-        # the root/index of domain, as this would be a unecessary check
-        # as we'll be inherting from the domain level anyways.
+        c1 = request_path
+        c2 = 'path' in mapping
+        c3 = c2 and request_path in mapping['path']
+
+        # If all of the above conditions do not match (cleaner to read)
+        if (c1 or c1 == '') and not all([c2, c3]):
+            if not is_safe:
+                raise UrlManagementException(403, f"Unsafe URL {request_path}")
+
+            return mapping
+
+        # Determine if the path is safe
+        is_safe = mapping['path'][request_path].get('safe', is_safe)
 
         # Regular expression match:
         #
@@ -319,23 +476,8 @@ class UrlManagement(object):
         # * cisco.com/
         # * cisco.com
         if request_path and re.search(r'^[\/ ]+', request_path):
-            if request_path not in mapping['path'].keys():
-                if is_safe:
-                    app.logger.debug(f"Path {request_path} not registered yet")
-
-                    return mapping
-                else:
-                    # If the request_path is not defined, and the domain is not safe
-                    # raise an Exception that this is not a safe location.
-                    raise UrlManagementException(403, f"Unsafe URL {request_path}")
-            else:
-                # If the request path is defined, then inherit the safe value from the
-                # request_path so we can block the domain for example, but give permission
-                # based on the request_path.
-                is_safe = mapping['path'][request_path].get('safe', True)
-
             # Since attributes may have the same key, we need to use multi=True
-            # https://tedboy.github.io/flask/generated/generated/werkzeug.ImmutableMultiDict.iteritems.html#werkzeug.ImmutableMultiDict.iteritems
+            # https://tedboy.github.io/flask/generated/generated/werkzeug.ImmutableMultiDict.iteritems.html
 
             for (request_qs_key, request_qs_value) in request_qs.items(multi=True):
                 # app.logger.debug(f"Validating query parameter ({request_qs_key}={request_qs_value})")
@@ -382,19 +524,16 @@ def get_request_url(request_url):
         if not re.search(r'^(http[s]?)', updated_request_url):
             updated_request_url = f'https://{request_url}'
 
-        # tld = tldextract.extract(updated_request_url)
-        #
-        # db = SHARD_DB_ID.get(tld.domain[0])
-        # app.logger.debug(f"Using database {db} for {tld.domain}")
+        tld = tldextract.extract(updated_request_url)
 
         # Our default redis database
-        db = 0
+        url_management = UrlManagement.get_instance_for_domain(
+            ".".join([tld.domain, tld.suffix]))
 
         # Python bug in urlparse(), scheme parameter does not change the scheme
         parts = urlparse(updated_request_url)
 
-        um = UrlManagement(db=db)
-        um.get(parts.netloc, path=parts.path, qs=request.args)
+        url_management.get(parts.netloc, path=parts.path, qs=request.args)
 
         return app.response_class(
             status=200,
