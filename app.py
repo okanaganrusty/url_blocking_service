@@ -3,9 +3,13 @@
 
 """ URL blocking service """
 
+import contextlib
+import logging
 import math
+import os
 import re
 import string
+import sys
 import time
 from urllib.parse import urlparse
 
@@ -18,6 +22,11 @@ from jsonschema.exceptions import ValidationError
 
 app = Flask(__name__)
 api = Api(app)
+
+# logging.basicConfig(stream=sys.stderr)
+# log = logging.getLogger(__name__)
+# log.setLevel(logging.DEBUG)
+
 
 # Validate our JSON
 JSON_SCHEMA = {
@@ -100,6 +109,26 @@ SHARD_DB_ID = {
 REDIS_DB_MAX_ID = 16
 
 
+class RedisClient(object):
+    """ Redis client with connection pools per database ID """
+    pool = {}
+
+    def __init__(self):
+        self.pool[0] = redis.BlockingConnectionPool(db=0)
+
+    @contextlib.contextmanager
+    def getConnection(self, **kwargs):
+        """ Get a connection """
+        db = int(kwargs.get('db', 0))
+
+        if db not in self.pool:
+            self.pool[db] = redis.BlockingConnectionPool(db=db)
+
+        client = redis.StrictRedis(connection_pool=self.pool[db])
+        yield client
+        client.close()
+
+
 class UrlManagementException(Exception):
     """
     Exception implementation as linter does not allow us to use
@@ -124,13 +153,9 @@ class UrlManagementDomainsAPI(Resource):
         response = []
 
         for index in range(REDIS_DB_MAX_ID):
-            c = redis.StrictRedis(
-                host=kwargs.get('host', 'localhost'),
-                port=kwargs.get('port', 6379),
-                db=kwargs.get('db', index),
-                decode_responses=True)
-
-            response.extend(c.keys('*'))
+            with client.getConnection(db=index) as c:
+                # redis_client = client.getConnection(db=index)
+                response.extend([key.decode() for key in c.keys('*')])
 
         return response
 
@@ -224,17 +249,27 @@ class UrlManagementDomainAPI(Resource):
 class UrlManagement:
     """ URL Management """
 
-    # Redis connection object
-    c = None
+    def __init__(self, *args, **kwargs):
+        self.db = kwargs.get('db', 0)
 
     @classmethod
     def get_instance_for_domain(cls, domain_name):
+        """ Get a URL management instance """
+        return cls(db=cls.get_database_id_for_domain(domain_name))
+
+    @classmethod
+    def get_database_id_for_domain(cls, domain_name):
         """ Database shard """
-        tld = tldextract.extract(domain_name)
+        try:
+            tld = tldextract.extract(domain_name)
 
-        db = SHARD_DB_ID.get(tld.domain[0], 0)
-
-        return cls(db=db)
+            return SHARD_DB_ID.get(tld.domain[0], 0)
+        except ValueError:
+            # Return database 0 if there is an issue, this should be
+            # well caught before in the get()/set() methods however
+            # as the only case is when the domain is not set in the
+            # URL.
+            return 0
 
     @staticmethod
     def empty(*args, **kwargs):
@@ -245,6 +280,7 @@ class UrlManagement:
                 port=kwargs.get('port', 6379),
                 db=kwargs.get('db'),
                 decode_responses=True)
+
             c.flushall()
         else:
             for index in range(REDIS_DB_MAX_ID):
@@ -258,29 +294,12 @@ class UrlManagement:
 
         return True
 
-    @classmethod
-    def set_domain(cls, domain_name, *args, **kwargs):
-        """
-        Since we're using separate databases now we need
-        this for testing so we can inject fixtures into
-        the correct database during testing
-        """
-
-        c = cls.get_instance_for_domain(domain_name)
-
-        return c.set(domain_name, *args, **kwargs)
-
-    def __init__(self, *args, **kwargs):
-        """ Database number for requests """
-        self.c = redis.StrictRedis(
-            host=kwargs.get('host', 'localhost'),
-            port=kwargs.get('port', 6379),
-            db=kwargs.get('db', 0),
-            decode_responses=True)
-
     def create(self, domain_name, data):
         """ Create a domain """
-        return self.c.set(domain_name, data)
+        with client.getConnection(db=UrlManagement.get_database_id_for_domain(domain_name)) as c:
+            c.set(domain_name, data)
+
+        return True
 
     def get_domain(self, domain_name):
         """ Public method for now while we test """
@@ -292,16 +311,18 @@ class UrlManagement:
         # If the domain exists, we'll fetch the existing metadata and
         # so that we can make an update, otherwise we'll start with
         # a new uninitalized hash
-        mapping = self.c.exists(domain_name) \
-            and self.c.get(domain_name) \
-            or {}
+        with client.getConnection(db=UrlManagement.get_database_id_for_domain(domain_name)) as c:
+            mapping = c.exists(domain_name) and c.get(domain_name) or {}
 
-        # Convert JSON encoded payload to an object
-        if isinstance(mapping, str):
-            mapping = json.loads(mapping)
+            # Convert JSON encoded payload to an object
+            if isinstance(mapping, str):
+                mapping = json.loads(mapping)
 
-        if mapping:
-            return mapping
+            elif isinstance(mapping, bytes):
+                mapping = json.loads(mapping.decode())
+
+            if mapping:
+                return mapping
 
         return {}
 
@@ -312,27 +333,31 @@ class UrlManagement:
 
         mapping = self._get_domain(domain_name)
 
-        if not any(mapping):
-            # If mapping is empty, return
-            return False
+        with client.getConnection(db=UrlManagement.get_database_id_for_domain(domain_name)) as c:
+            if not any(mapping):
+                # If mapping is empty, return
+                return False
 
-        if all([request_path, request_qs]):
-            # Delete by request path and query set
-            request_qs = [dict(**qs, **{'_delete': True}) for qs in request_qs]
+            if all([request_path, request_qs]):
+                # Delete by request path and query set
+                request_qs = [dict(**qs, **{'_delete': True}) for qs in request_qs]
 
-            return self.set(domain_name, path=request_path, qs=request_qs)
-        elif request_path:
-            # Delete by request path
-            if 'path' in mapping.keys() and request_path in mapping['path'].keys():
-                del mapping['path'][request_path]
+                return self.set(domain_name, path=request_path, qs=request_qs)
 
-                self.c.set(domain_name, json.dumps(mapping))
-                return True
-        elif domain_name:
-            # Delete the domain and all children
-            self.c.delete(domain_name)
+            elif request_path:
+                # Delete by request path
+                if 'path' in mapping.keys() and request_path in mapping['path'].keys():
+                    del mapping['path'][request_path]
 
-            return self.c.exists(domain_name)
+                    # Write directly to redis to preserve existing paths
+                    c.set(domain_name, json.dumps(mapping))
+                    return True
+
+            elif domain_name:
+                # Delete the domain and all children
+                c.delete(domain_name)
+
+                return c.exists(domain_name)
 
         return False
 
@@ -343,79 +368,85 @@ class UrlManagement:
         updated = kwargs.get('updated', math.floor(time.time()))
         safe = kwargs.get('safe', None)
 
+        if not domain_name:
+            return False
+
         mapping = self._get_domain(domain_name)
 
-        # If there is already an existing entry for the domain and path,
-        # update any query string values as well that may have been
-        # added since the last request.
-        if request_path and 'path' in mapping.keys() and request_path in mapping['path'].keys():
+        # log.debug(f"Getting a connection for db={self.db}")
+        with client.getConnection(db=UrlManagement.get_database_id_for_domain(domain_name)) as c:
+            # If there is already an existing entry for the domain and path,
+            # update any query string values as well that may have been
+            # added since the last request.
 
-            # Merge the safe parameter for existing request path, if supplied.
-            if safe is not None:
-                mapping['path'][request_path]['safe'] = safe
-
-            for current_qs in request_qs:
-                # Don't use the updated key to match as its unique to the
-                # time the last time the object was created/updated.
-                current_qs_keys = current_qs.keys() - ["updated", "safe", "_delete"]
-
-                mapping_qs = mapping['path'][request_path]['qs']
-
-                for current_qs_key in current_qs_keys:
-                    for mapping_qs_index, mapping_qs_entry in enumerate(mapping_qs):
-                        mapping_qs_keys = mapping_qs_entry.keys() - ["updated", "safe", "_delete"]
-
-                        # Yes, there are many levels of nesting here, break it down later
-                        if current_qs_key in mapping_qs_keys and current_qs[current_qs_key] == mapping_qs_entry[current_qs_key]:
-                            if '_delete' in current_qs.keys():
-                                # Delete the element at a specific index, otherwise just update
-                                # or add to the list (array)
-
-                                del mapping['path'][request_path]['qs'][mapping_qs_index]
-                            else:
-                                # Retain logic to update an existing entry
-                                mapping['path'][request_path]['qs'][mapping_qs_index].update({
-                                    'updated': updated,
-                                    'safe': current_qs.get('safe', safe)
-                                })
-                        elif not current_qs.get('_delete', False):
-                            # Only add new entries if they don't have a _delete flag
-                            mapping['path'][request_path]['qs'].append({
-                                current_qs_key: current_qs[current_qs_key],
-                                'updated': updated,
-                                'safe': current_qs.get('safe', safe)
-                            })
-        else:
-            # Add an updated timestamp to newly created objects too
-            for qs in request_qs:
-                if 'updated' not in qs.keys():
-                    qs['updated'] = updated
-
-            if request_path:
-                # If 'path' does not exist in the hash yet, add it for the
-                # first request path entry
-
-                if 'path' not in mapping.keys():
-                    mapping['path'] = {}
-
-                mapping['path'][request_path] = {
-                    'qs': request_qs,
-                    'updated': updated
-                }
-
+            if request_path and 'path' in mapping.keys() and request_path in mapping['path'].keys():
+                # Merge the safe parameter for existing request path, if supplied.
                 if safe is not None:
                     mapping['path'][request_path]['safe'] = safe
 
+                for current_qs in request_qs:
+                    # Don't use the updated key to match as its unique to the
+                    # time the last time the object was created/updated.
+                    current_qs_keys = current_qs.keys() - ["updated", "safe", "_delete"]
+
+                    mapping_qs = mapping['path'][request_path]['qs']
+
+                    for current_qs_key in current_qs_keys:
+                        for mapping_qs_index, mapping_qs_entry in enumerate(mapping_qs):
+                            mapping_qs_keys = mapping_qs_entry.keys() - ["updated", "safe", "_delete"]
+
+                            # Yes, there are many levels of nesting here, break it down later
+                            if current_qs_key in mapping_qs_keys and current_qs[current_qs_key] == mapping_qs_entry[current_qs_key]:
+                                if '_delete' in current_qs.keys():
+                                    # Delete the element at a specific index, otherwise just update
+                                    # or add to the list (array)
+
+                                    del mapping['path'][request_path]['qs'][mapping_qs_index]
+                                else:
+                                    # Retain logic to update an existing entry
+                                    mapping['path'][request_path]['qs'][mapping_qs_index].update({
+                                        'updated': updated,
+                                        'safe': current_qs.get('safe', safe)
+                                    })
+                            elif not current_qs.get('_delete', False):
+                                # Only add new entries if they don't have a _delete flag
+                                mapping['path'][request_path]['qs'].append({
+                                    current_qs_key: current_qs[current_qs_key],
+                                    'updated': updated,
+                                    'safe': current_qs.get('safe', safe)
+                                })
             else:
-                # If no request path provided, mark the domain
-                mapping = {
-                    'updated': updated,
-                }
+                # Add an updated timestamp to newly created objects too
+                for qs in request_qs:
+                    if 'updated' not in qs.keys():
+                        qs['updated'] = updated
 
-                if safe is not None:
-                    mapping['safe'] = safe
+                if request_path:
+                    # If 'path' does not exist in the hash yet, add it for the
+                    # first request path entry
 
-        self.c.set(domain_name, json.dumps(mapping))
+                    if 'path' not in mapping.keys():
+                        mapping['path'] = {}
+
+                    mapping['path'][request_path] = {
+                        'qs': request_qs,
+                        'updated': updated
+                    }
+
+                    if safe is not None:
+                        mapping['path'][request_path]['safe'] = safe
+
+                else:
+                    # If no request path provided, mark the domain
+                    mapping = {
+                        'updated': updated,
+                    }
+
+                    if safe is not None:
+                        mapping['safe'] = safe
+
+            c.set(domain_name, json.dumps(mapping))
+
         return True
 
     def get(self, domain_name, **kwargs):
@@ -432,6 +463,9 @@ class UrlManagement:
         # parameters must exist for a match to be successful.
         request_qs = kwargs.get('qs', [])
 
+        if not domain_name:
+            return {}
+
         # If the domain exists, we'll fetch the existing metadata and
         # so that we can make an update, otherwise we'll start with
         # a new uninitalized hash
@@ -439,7 +473,7 @@ class UrlManagement:
 
         if not mapping:
             # Our default is to return safe URLs
-            app.logger.debug(f"Domain {domain_name} could not be located")
+            # app.logger.debug(f"Domain {domain_name} could not be located")
 
             return mapping
 
@@ -551,6 +585,8 @@ def get_request_url(request_url):
             }),
             mimetype='application/json')
 
+
+client = RedisClient()
 
 api.add_resource(UrlManagementDomainsAPI, '/admin/domains')
 api.add_resource(UrlManagementDomainAPI, '/admin/domain/<string:domain_name>')
